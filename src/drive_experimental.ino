@@ -22,9 +22,9 @@ const int right_sleep_pin = 11;
 // ---------------------------------------------------------
 // 3. SPEED & PD TUNING
 // ---------------------------------------------------------
-int base_speed = 80;       // increased from 80
-float Kp = 0.1;            // slightly reduced to prevent overcorrection at speed
-float Kd = 0.05;            // tripled to dampen swerving at higher speed
+int base_speed = 120;       // increased from 80
+float Kp = 0.05;            // slightly reduced to prevent overcorrection at speed
+float Kd = 0.3;            // tripled to dampen swerving at higher speed
 
 float previous_error = 0; 
 float last_known_error = 0; 
@@ -45,8 +45,8 @@ unsigned long cooldownStart = 0;
 const unsigned long COOLDOWN_MS = 4000; // 4 seconds blind after turn
 
 // U-turn tuning — adjust UTURN_DURATION_MS until you get ~180 degrees
-const int UTURN_SPEED = 100;
-const int UTURN_DURATION_MS = 650;  // start here, tune up/down by 50ms
+const int UTURN_SPEED = 120;
+const int UTURN_DURATION_MS = 520;  // start here, tune up/down by 50ms
 
 // ---------------------------------------------------------
 // HELPER FUNCTIONS
@@ -86,7 +86,7 @@ void performUTurn() {
 
   // Stop and reset direction pins to forward
   stopMotors();
-  delay(200);
+  delay(50);
   digitalWrite(left_dir_pin, LOW);
   digitalWrite(right_dir_pin, LOW);
 }
@@ -145,7 +145,7 @@ void loop() {
       Serial.println("End of track! Performing U-turn...");
       hasReachedEnd = true;
       stopMotors();
-      delay(100);
+      delay(50);
       performUTurn();
       inCooldown = true;
       cooldownStart = millis();
