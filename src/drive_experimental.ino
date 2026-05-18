@@ -15,167 +15,200 @@ int weights[8] = {-8, -4, -2, -1, 1, 2, 4, 8};
 const int left_dir_pin = 29; 
 const int left_pwm_pin = 40;
 const int left_sleep_pin = 31;  
-
 const int right_dir_pin = 30;
 const int right_pwm_pin = 39;
 const int right_sleep_pin = 11; 
 
 // ---------------------------------------------------------
-// 3. BASE SPEED & PID TUNING PARAMETERS
+// 3. SPEED & PD TUNING
 // ---------------------------------------------------------
-int base_speed = 80;    
-float Kp = 0.1;        // Proportional (Steering power)
-// float Kd = 0.1;        // Derivative (Dampening/Jitter reduction)
-// float Ki = 0.001;       // Integral (Sustained curve correction)
+int base_speed = 80;       // increased from 80
+float Kp = 0.1;            // slightly reduced to prevent overcorrection at speed
+float Kd = 0.05;            // tripled to dampen swerving at higher speed
 
-// Memory variables for PID and Recovery
 float previous_error = 0; 
-float error_integral = 0; 
 float last_known_error = 0; 
 
+// ---------------------------------------------------------
+// 4. BLACK LINE DETECTION
+// ---------------------------------------------------------
+int finish_counter = 0;
+const int finish_confirm_needed = 2;
+const int FINISH_THRESHOLD = 1800;
+
+// ---------------------------------------------------------
+// 5. STATE TRACKING
+// ---------------------------------------------------------
+bool hasReachedEnd = false;         // Has the car done the 180 yet?
+bool inCooldown = false;            // Ignore black line after U-turn
+unsigned long cooldownStart = 0;
+const unsigned long COOLDOWN_MS = 4000; // 4 seconds blind after turn
+
+// U-turn tuning — adjust UTURN_DURATION_MS until you get ~180 degrees
+const int UTURN_SPEED = 100;
+const int UTURN_DURATION_MS = 650;  // start here, tune up/down by 50ms
+
+// ---------------------------------------------------------
+// HELPER FUNCTIONS
+// ---------------------------------------------------------
+void stopMotors() {
+  analogWrite(left_pwm_pin, 0);
+  analogWrite(right_pwm_pin, 0);
+}
+
+bool finishLineDetected() {
+  int left_votes = 0;
+  int right_votes = 0;
+
+  if (sensorValues[0] > FINISH_THRESHOLD) left_votes++;
+  if (sensorValues[1] > FINISH_THRESHOLD) left_votes++;
+  if (sensorValues[2] > FINISH_THRESHOLD) left_votes++;
+  if (sensorValues[3] > FINISH_THRESHOLD) left_votes++;
+
+  if (sensorValues[4] > FINISH_THRESHOLD) right_votes++;
+  if (sensorValues[5] > FINISH_THRESHOLD) right_votes++;
+  if (sensorValues[6] > FINISH_THRESHOLD) right_votes++;
+  if (sensorValues[7] > FINISH_THRESHOLD) right_votes++;
+
+  // Both sides must see black — prevents false trigger on turns
+  return (left_votes >= 2 && right_votes >= 2);
+}
+
+void performUTurn() {
+  // Spin in place: left wheel forward, right wheel backward
+  // If car turns the wrong way, swap HIGH <-> LOW on the dir pins below
+  digitalWrite(left_dir_pin, LOW);    // left forward
+  digitalWrite(right_dir_pin, HIGH);  // right backward
+  analogWrite(left_pwm_pin, UTURN_SPEED);
+  analogWrite(right_pwm_pin, UTURN_SPEED);
+
+  delay(UTURN_DURATION_MS);
+
+  // Stop and reset direction pins to forward
+  stopMotors();
+  delay(200);
+  digitalWrite(left_dir_pin, LOW);
+  digitalWrite(right_dir_pin, LOW);
+}
+
+// ---------------------------------------------------------
+// SETUP
+// ---------------------------------------------------------
 void setup() {
   ECE3_Init();
   Serial.begin(9600);
   
-  // Initialize Pins
   pinMode(left_dir_pin, OUTPUT);
   pinMode(left_pwm_pin, OUTPUT);
   pinMode(right_dir_pin, OUTPUT);
   pinMode(right_pwm_pin, OUTPUT);
   
-  // Wake up motor drivers
   pinMode(left_sleep_pin, OUTPUT);     
   digitalWrite(left_sleep_pin, HIGH);  
   pinMode(right_sleep_pin, OUTPUT);    
   digitalWrite(right_sleep_pin, HIGH); 
   
-  // Default to forward
   digitalWrite(left_dir_pin, LOW);
   digitalWrite(right_dir_pin, LOW);
   
   delay(2000); 
 }
 
+// ---------------------------------------------------------
+// MAIN LOOP
+// ---------------------------------------------------------
 void loop() {
-  // =========================================================
-  // BLOCK 1: IR Sensors take reading
-  // =========================================================
   ECE3_read_IR(sensorValues);
 
-// =========================================================
-  // BLOCK 2: Generate Error Term (Normalize & Weight)
-  // =========================================================
+  // -------------------------------------------------------
+  // BLOCK 1: Cooldown timer check
+  // -------------------------------------------------------
+  if (inCooldown && (millis() - cooldownStart > COOLDOWN_MS)) {
+    inCooldown = false;
+    Serial.println("Cooldown over. Watching for start line.");
+  }
+
+  // -------------------------------------------------------
+  // BLOCK 2: Black line detection & state handling
+  // -------------------------------------------------------
+  if (!inCooldown && finishLineDetected()) {
+    finish_counter++;
+  } else {
+    finish_counter = 0;
+  }
+
+  if (finish_counter >= finish_confirm_needed) {
+    finish_counter = 0; // reset for next detection
+
+    if (!hasReachedEnd) {
+      // First black line = end of track → do 180
+      Serial.println("End of track! Performing U-turn...");
+      hasReachedEnd = true;
+      stopMotors();
+      delay(100);
+      performUTurn();
+      inCooldown = true;
+      cooldownStart = millis();
+
+    } else {
+      // Second black line = start line → stop permanently
+      Serial.println("Start line reached. Stopping.");
+      stopMotors();
+      while (true) {}
+    }
+  }
+
+  // -------------------------------------------------------
+  // BLOCK 3: Normalize sensors
+  // -------------------------------------------------------
   float fused_error = 0;
   float total_sensor_sum = 0;
-  
-  // NEW: An array to hold the 0-1000 value for each specific sensor
   float normalized[8]; 
 
   for (int i = 0; i < 8; i++) {
-    // Subtract minimum (floor at 0)
     float zeroed_value = sensorValues[i] - min_values[i];
-    if (zeroed_value < 0) { zeroed_value = 0; }
-
-    // Normalize per sensor to 1000
+    if (zeroed_value < 0) zeroed_value = 0;
     float normalized_value = (zeroed_value * 1000.0) / max_values[i];
-    
-    // NEW: Save this sensor's specific value to our array
-    normalized[i] = normalized_value; 
-    
+    normalized_value = constrain(normalized_value, 0, 1000);
+    normalized[i] = normalized_value;
     total_sensor_sum += normalized_value;
-
-    // Apply weighting scheme
-    fused_error += (normalized_value * weights[i]);
+    fused_error += normalized_value * weights[i];
   }
   
-  // Weighted average divisor
   fused_error = fused_error / 8.0;
 
-  int left_speed;
-  int right_speed;
-
-  // =========================================================
-  // BLOCK 3: Determine Wheel Speed Corrections
-  // Sub-block A: Check for specific track conditions
-  // =========================================================
-  
-  // Define what "black" means on our 0-1000 scale
-  int black_threshold = 1200; 
-
-  // Condition 1: Solid black line / Finish Line (Your New Logic!)
-  // Check if sensors at indices 1 through 6 ALL see black
-  if (normalized[1] > black_threshold && 
-      normalized[2] > black_threshold && 
-      normalized[3] > black_threshold && 
-      normalized[4] > black_threshold && 
-      normalized[5] > black_threshold && 
-      normalized[6] > black_threshold) {
-    
-    analogWrite(left_pwm_pin, 0);
-    analogWrite(right_pwm_pin, 0);
-    Serial.println("Middle 6 Sensors see Black! Stopping.");
-    while(true) {} // Freeze
-  }
-
-  // Condition 2: Total loss of track (Recovery)
-  else if (total_sensor_sum < 400) {
+  // -------------------------------------------------------
+  // BLOCK 4: Recovery if track is lost
+  // -------------------------------------------------------
+  if (total_sensor_sum < 400) {
     if (last_known_error < 0) {
-      // Line was to the left, spin left
       digitalWrite(left_dir_pin, HIGH);  
       digitalWrite(right_dir_pin, LOW);  
-      analogWrite(left_pwm_pin, 60);
-      analogWrite(right_pwm_pin, 60);
-      return; // Skip the rest of the loop
     } else {
-      // Line was to the right, spin right
       digitalWrite(right_dir_pin, HIGH); 
       digitalWrite(left_dir_pin, LOW);   
-      analogWrite(left_pwm_pin, 60);
-      analogWrite(right_pwm_pin, 60);
-      return; 
     }
-  } 
+    analogWrite(left_pwm_pin, 60);
+    analogWrite(right_pwm_pin, 60);
+    return;
+  }
 
-  // Update memory if we are safely on the track
   last_known_error = fused_error;
 
-  // =========================================================
-  // BLOCK 3: Determine Wheel Speed Corrections
-  // Sub-block B: Compute steering changes with PID
-  // =========================================================
-  
+  // -------------------------------------------------------
+  // BLOCK 5: PD steering
+  // -------------------------------------------------------
   digitalWrite(left_dir_pin, LOW);
   digitalWrite(right_dir_pin, LOW);
   
-  // 1. Proportional (P)
   float P_term = fused_error * Kp;
-  
-  // 2. Integral (I) - Accumulates error over time
-  error_integral += fused_error;
-  //float I_term = error_integral * Ki;
-  
-  // 3. Derivative (D) - Looks at the rate of change
-  float derivative = fused_error - previous_error;
-  //float D_term = derivative * Kd;
-  
-  // Total Steering Correction
-  float steering_correction = P_term;
-  
-  // Save current error for the next loop's derivative math
+  float D_term = (fused_error - previous_error) * Kd;
+  float steering_correction = P_term + D_term;
   previous_error = fused_error;
 
-  // =========================================================
-  // BLOCK 4: Combine with Base Speed
-  // =========================================================
-  
-  left_speed = base_speed - steering_correction;
-  right_speed = base_speed + steering_correction;
-  
-  // Clamp speeds to valid PWM range (0-255)
-  left_speed = constrain(left_speed, 0, 255);
-  right_speed = constrain(right_speed, 0, 255);
+  int left_speed  = constrain(base_speed - steering_correction, 0, 255);
+  int right_speed = constrain(base_speed + steering_correction, 0, 255);
 
-  // Send to motors (Car Movement on Track)
   analogWrite(left_pwm_pin, left_speed);
   analogWrite(right_pwm_pin, right_speed);
 }
