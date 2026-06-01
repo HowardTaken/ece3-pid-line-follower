@@ -7,7 +7,7 @@ uint16_t sensorValues[8];
 // ---------------------------------------------------------
 int min_values[8] = {639, 596, 527, 733, 688, 666, 852, 689};
 int max_values[8] = {1861, 1796, 1794, 1542, 1681, 1834, 1648, 1811};
-int weights[8] = {-8, -4, -2, -1, 1, 2, 4, 8};
+int weights[8] = {-16, -8, -4, -1, 1, 4, 8, 16};  // doubled outer weights
 
 // ---------------------------------------------------------
 // 2. PIN DEFINITIONS
@@ -22,9 +22,9 @@ const int right_sleep_pin = 11;
 // ---------------------------------------------------------
 // 3. SPEED & PD TUNING
 // ---------------------------------------------------------
-int base_speed = 120;       // increased from 80
-float Kp = 0.05;            // slightly reduced to prevent overcorrection at speed
-float Kd = 0.3;            // tripled to dampen swerving at higher speed
+int base_speed = 160;
+float Kp = 0.13;
+float Kd = 1.30;
 
 float previous_error = 0; 
 float last_known_error = 0; 
@@ -33,20 +33,19 @@ float last_known_error = 0;
 // 4. BLACK LINE DETECTION
 // ---------------------------------------------------------
 int finish_counter = 0;
-const int finish_confirm_needed = 2;
-const int FINISH_THRESHOLD = 1800;
+const int finish_confirm_needed = 3;
+const int FINISH_THRESHOLD = 2200;
 
 // ---------------------------------------------------------
 // 5. STATE TRACKING
 // ---------------------------------------------------------
-bool hasReachedEnd = false;         // Has the car done the 180 yet?
-bool inCooldown = false;            // Ignore black line after U-turn
+bool hasReachedEnd = false;
+bool inCooldown = false;
 unsigned long cooldownStart = 0;
-const unsigned long COOLDOWN_MS = 4000; // 4 seconds blind after turn
+const unsigned long COOLDOWN_MS = 4000;
 
-// U-turn tuning — adjust UTURN_DURATION_MS until you get ~180 degrees
 const int UTURN_SPEED = 120;
-const int UTURN_DURATION_MS = 520;  // start here, tune up/down by 50ms
+const int UTURN_DURATION_MS = 500;  // adjusted for speed 140
 
 // ---------------------------------------------------------
 // HELPER FUNCTIONS
@@ -70,23 +69,19 @@ bool finishLineDetected() {
   if (sensorValues[6] > FINISH_THRESHOLD) right_votes++;
   if (sensorValues[7] > FINISH_THRESHOLD) right_votes++;
 
-  // Both sides must see black — prevents false trigger on turns
   return (left_votes >= 2 && right_votes >= 2);
 }
 
 void performUTurn() {
-  // Spin in place: left wheel forward, right wheel backward
-  // If car turns the wrong way, swap HIGH <-> LOW on the dir pins below
-  digitalWrite(left_dir_pin, LOW);    // left forward
-  digitalWrite(right_dir_pin, HIGH);  // right backward
+  digitalWrite(left_dir_pin, LOW);
+  digitalWrite(right_dir_pin, HIGH);
   analogWrite(left_pwm_pin, UTURN_SPEED);
   analogWrite(right_pwm_pin, UTURN_SPEED);
 
   delay(UTURN_DURATION_MS);
 
-  // Stop and reset direction pins to forward
   stopMotors();
-  delay(50);
+  delay(25);
   digitalWrite(left_dir_pin, LOW);
   digitalWrite(right_dir_pin, LOW);
 }
@@ -125,7 +120,6 @@ void loop() {
   // -------------------------------------------------------
   if (inCooldown && (millis() - cooldownStart > COOLDOWN_MS)) {
     inCooldown = false;
-    Serial.println("Cooldown over. Watching for start line.");
   }
 
   // -------------------------------------------------------
@@ -138,21 +132,16 @@ void loop() {
   }
 
   if (finish_counter >= finish_confirm_needed) {
-    finish_counter = 0; // reset for next detection
+    finish_counter = 0;
 
     if (!hasReachedEnd) {
-      // First black line = end of track → do 180
-      Serial.println("End of track! Performing U-turn...");
       hasReachedEnd = true;
       stopMotors();
-      delay(50);
+      delay(25);
       performUTurn();
       inCooldown = true;
       cooldownStart = millis();
-
     } else {
-      // Second black line = start line → stop permanently
-      Serial.println("Start line reached. Stopping.");
       stopMotors();
       while (true) {}
     }
